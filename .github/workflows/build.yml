@@ -1,0 +1,103 @@
+name: Build SEJ Location Guide
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test rules (IRPWM / CT-48)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run unit tests
+        run: dotnet test tests/SejGuide.Tests/SejGuide.Tests.csproj -c Release --logger "console;verbosity=normal"
+
+  windows:
+    name: Windows exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install MAUI workload
+        run: dotnet workload install maui
+      - name: Publish Windows app (unpackaged, self-contained)
+        run: >
+          dotnet publish src/SejGuide.App/SejGuide.App.csproj
+          -f net8.0-windows10.0.19041.0 -c Release
+          -p:RuntimeIdentifierOverride=win10-x64
+          -p:WindowsPackageType=None
+          -p:WindowsAppSDKSelfContained=true
+          -p:SelfContained=true
+          -o publish/windows
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path publish/windows/* -DestinationPath SEJ-Location-Guide-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SEJ-Location-Guide-Windows
+          path: SEJ-Location-Guide-Windows.zip
+
+  android:
+    name: Android apk
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install MAUI workload
+        run: dotnet workload install maui
+      - name: Publish Android apk
+        run: >
+          dotnet publish src/SejGuide.App/SejGuide.App.csproj
+          -f net8.0-android -c Release
+          -p:AndroidPackageFormat=apk
+          -o publish/android
+      - name: Rename apk
+        shell: pwsh
+        run: |
+          $apk = Get-ChildItem publish/android -Filter *-Signed.apk | Select-Object -First 1
+          Copy-Item $apk.FullName SEJ-Location-Guide.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SEJ-Location-Guide-Android
+          path: SEJ-Location-Guide.apk
+
+  release:
+    name: Publish release
+    needs: [ windows, android ]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: SEJ Location Guide v1.0.${{ github.run_number }}
+          body: |
+            SEJ Location Guide – IRPWM 2024 (ACS-16) & RDSO CT-48 (Nov 2025).
+            Prepared by Dharam Pal Jangid, SSE (P. Way) Bundi, WCRly. Mob. 7976273600.
+
+            * **Windows:** download `SEJ-Location-Guide-Windows.zip`, extract it, and run `SejGuide.exe`.
+            * **Android:** download `SEJ-Location-Guide.apk`, open it, and allow "Install unknown apps" when asked.
+          files: |
+            dist/SEJ-Location-Guide-Windows.zip
+            dist/SEJ-Location-Guide.apk
