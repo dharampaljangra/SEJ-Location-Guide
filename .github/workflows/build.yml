@@ -21,6 +21,9 @@ jobs:
     name: Windows exe
     needs: test
     runs-on: windows-latest
+    env:
+      WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -37,18 +40,43 @@ jobs:
           -p:WindowsAppSDKSelfContained=true
           -p:SelfContained=true
           -o publish/windows
+      - name: Sign Windows exe and app DLLs
+        if: env.WINDOWS_PFX_BASE64 != '' && env.SIGNING_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sejguide.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          $files = @('SejGuide.exe', 'SejGuide.dll', 'SejGuide.Core.dll') | ForEach-Object { Join-Path 'publish/windows' $_ } | Where-Object { Test-Path $_ }
+          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 /d "SEJ Location Guide" @files
+          $code = $LASTEXITCODE
+          Remove-Item $pfx -Force
+          if ($code -ne 0) { throw "signtool failed with exit code $code" }
+          foreach ($f in $files) { $sig = Get-AuthenticodeSignature $f; Write-Host "$f signed by: $($sig.SignerCertificate.Subject)" }
+          Copy-Item signing/SEJ-Location-Guide-Certificate.cer publish/windows/
+          Copy-Item signing/SEJ-Location-Guide-Certificate.cer SEJ-Location-Guide-Certificate.cer
+      - name: Warn if not signed
+        if: env.WINDOWS_PFX_BASE64 == '' || env.SIGNING_PASSWORD == ''
+        run: echo "::warning::WINDOWS_PFX_BASE64 / SIGNING_PASSWORD secrets not set - Windows exe is NOT signed"
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path publish/windows/* -DestinationPath SEJ-Location-Guide-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: SEJ-Location-Guide-Windows
-          path: SEJ-Location-Guide-Windows.zip
+          path: |
+            SEJ-Location-Guide-Windows.zip
+            SEJ-Location-Guide-Certificate.cer
+          if-no-files-found: warn
 
   android:
     name: Android apk
     needs: test
     runs-on: windows-latest
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -60,17 +88,31 @@ jobs:
           java-version: '17'
       - name: Install MAUI workload
         run: dotnet workload install maui
+      - name: Decode Android keystore
+        if: env.ANDROID_KEYSTORE_BASE64 != '' && env.SIGNING_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $ks = Join-Path $env:RUNNER_TEMP 'sejguide.keystore'
+          [IO.File]::WriteAllBytes($ks, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          "SIGN_ARGS=-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=$ks -p:AndroidSigningKeyAlias=sejguide -p:AndroidSigningKeyPass=env:SIGNING_PASSWORD -p:AndroidSigningStorePass=env:SIGNING_PASSWORD" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Warn if not signed
+        if: env.ANDROID_KEYSTORE_BASE64 == '' || env.SIGNING_PASSWORD == ''
+        run: echo "::warning::ANDROID_KEYSTORE_BASE64 / SIGNING_PASSWORD secrets not set - apk signed with a temporary debug key"
       - name: Publish Android apk
         run: >
           dotnet publish src/SejGuide.App/SejGuide.App.csproj
           -f net10.0-android -c Release
           -p:AndroidPackageFormat=apk
+          ${{ env.SIGN_ARGS }}
           -o publish/android
       - name: Rename apk
         shell: pwsh
         run: |
           $apk = Get-ChildItem publish/android -Filter *-Signed.apk | Select-Object -First 1
           Copy-Item $apk.FullName SEJ-Location-Guide.apk
+          keytool -printcert -jarfile SEJ-Location-Guide.apk | Select-String 'Owner|SHA256:' | Select-Object -First 2
+          if (Test-Path (Join-Path $env:RUNNER_TEMP 'sejguide.keystore')) { Remove-Item (Join-Path $env:RUNNER_TEMP 'sejguide.keystore') -Force }
       - uses: actions/upload-artifact@v4
         with:
           name: SEJ-Location-Guide-Android
@@ -98,6 +140,11 @@ jobs:
 
             * **Windows:** download `SEJ-Location-Guide-Windows.zip`, extract it, and run `SejGuide.exe`.
             * **Android:** download `SEJ-Location-Guide.apk`, open it, and allow "Install unknown apps" when asked.
+
+            Both files are digitally signed by Dharam Pal Jangid. To make Windows trust the publisher, open
+            `SEJ-Location-Guide-Certificate.cer` → Install Certificate → Local Machine → place it in
+            "Trusted Root Certification Authorities" and again in "Trusted Publishers".
           files: |
             dist/SEJ-Location-Guide-Windows.zip
             dist/SEJ-Location-Guide.apk
+            dist/SEJ-Location-Guide-Certificate.cer
