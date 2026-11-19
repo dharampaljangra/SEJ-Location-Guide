@@ -49,10 +49,9 @@ jobs:
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
           $files = @('SejGuide.exe', 'SejGuide.dll', 'SejGuide.Core.dll') | ForEach-Object { Join-Path 'publish/windows' $_ } | Where-Object { Test-Path $_ }
+          "SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 /d "SEJ Location Guide" @files
-          $code = $LASTEXITCODE
-          Remove-Item $pfx -Force
-          if ($code -ne 0) { throw "signtool failed with exit code $code" }
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
           foreach ($f in $files) { $sig = Get-AuthenticodeSignature $f; Write-Host "$f signed by: $($sig.SignerCertificate.Subject)" }
           Copy-Item signing/SEJ-Location-Guide-Certificate.cer publish/windows/
           Copy-Item signing/SEJ-Location-Guide-Certificate.cer SEJ-Location-Guide-Certificate.cer
@@ -62,10 +61,33 @@ jobs:
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path publish/windows/* -DestinationPath SEJ-Location-Guide-Windows.zip
+      - name: Build Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc.exe -ErrorAction Stop).Source }
+          & $iscc /Qp "/DMyAppVersion=1.0.${{ github.run_number }}" installer/SejGuide.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          Copy-Item installer-output/SEJ-Location-Guide-Setup.exe SEJ-Location-Guide-Setup.exe
+      - name: Sign installer
+        if: env.WINDOWS_PFX_BASE64 != '' && env.SIGNING_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sejguide.pfx'
+          & $env:SIGNTOOL sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 /d "SEJ Location Guide Setup" SEJ-Location-Guide-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+          $sig = Get-AuthenticodeSignature SEJ-Location-Guide-Setup.exe
+          Write-Host "SEJ-Location-Guide-Setup.exe signed by: $($sig.SignerCertificate.Subject)"
+      - name: Remove signing key from runner
+        if: always()
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP 'sejguide.pfx') -Force -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
         with:
           name: SEJ-Location-Guide-Windows
           path: |
+            SEJ-Location-Guide-Setup.exe
             SEJ-Location-Guide-Windows.zip
             SEJ-Location-Guide-Certificate.cer
           if-no-files-found: warn
@@ -136,15 +158,17 @@ jobs:
           name: SEJ Location Guide v1.0.${{ github.run_number }}
           body: |
             SEJ Location Guide – IRPWM 2024 (ACS-16) & RDSO CT-48 (Nov 2025).
-            Prepared by Dharam Pal Jangid, SSE (P. Way) Bundi, WCRly. Mob. 7976273600.
+            DHARAM PAL JANGID, Senior Section Engineer (P.Way) Kota Division of WCRly
 
-            * **Windows:** download `SEJ-Location-Guide-Windows.zip`, extract it, and run `SejGuide.exe`.
+            * **Windows (recommended):** download `SEJ-Location-Guide-Setup.exe` and run it. It installs to Program Files, adds Start menu / desktop shortcuts, and can be removed from Settings → Apps.
+            * **Windows (portable, no install):** download `SEJ-Location-Guide-Windows.zip`, extract it, and run `SejGuide.exe`.
             * **Android:** download `SEJ-Location-Guide.apk`, open it, and allow "Install unknown apps" when asked.
 
-            Both files are digitally signed by Dharam Pal Jangid. To make Windows trust the publisher, open
-            `SEJ-Location-Guide-Certificate.cer` → Install Certificate → Local Machine → place it in
-            "Trusted Root Certification Authorities" and again in "Trusted Publishers".
+            All files are digitally signed by Dharam Pal Jangid. To stop the "Unknown publisher" warning, tick
+            "Trust the publisher certificate" during setup, or install `SEJ-Location-Guide-Certificate.cer`
+            (Install Certificate → Local Machine → "Trusted Root Certification Authorities", then again in "Trusted Publishers").
           files: |
+            dist/SEJ-Location-Guide-Setup.exe
             dist/SEJ-Location-Guide-Windows.zip
             dist/SEJ-Location-Guide.apk
             dist/SEJ-Location-Guide-Certificate.cer
